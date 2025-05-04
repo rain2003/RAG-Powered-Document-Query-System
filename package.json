@@ -1,0 +1,30 @@
+{
+  "name": "rag-powered-document-query",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "chromadb": "^1.10.4",
+    "chromadb-default-embed": "^2.13.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "fs": "^0.0.1-security",
+    "math.js": "^1.1.46",
+    "mathjs": "^14.2.1",
+    "mongodb": "^6.13.0",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^3.3.2",
+    "ollama": "^0.5.13",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.0.0",
+    "react-icons": "^5.5.0",
+    "sentence-splitter": "^5.0.0"
+  }
+}
