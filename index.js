@@ -13,13 +13,13 @@ const port = process.env.PORT || 3001;
 
 // Enhanced configuration
 const config = {
-  mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017",
+  mongoUri: process.env.MONGO_URI || "mongodb+srv://fakerk23:gJVVTk4MduBfwWES@cluster0.9prcksg.mongodb.net/",
   dbName: "embedding_db",
   collectionName: "document_embeddings",
   ollamaEmbeddingModel: "mxbai-embed-large",
   ollamaLLMModel: "llama3.1",
   chunkSize: 200,
-  similarityThreshold: 0.4,
+  similarityThreshold: 0.5,
   topKResults: 5,
   uploadDir: "uploads"
 };
@@ -64,9 +64,9 @@ async function connectToMongo() {
     await client.connect();
     console.log("Connected to MongoDB");
     // Create index for faster similarity searches
-    await client.db(config.dbName)
-      .collection(config.collectionName)
-      .createIndex({ embedding: "2dsphere" });
+    // await client.db(config.dbName)
+    //   .collection(config.collectionName)
+    //   .createIndex({ embedding: "2dsphere" });
   } catch (error) {
     console.error("Error connecting to MongoDB:", error);
     // Implement retry logic or exit process in production
@@ -233,43 +233,105 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 // Add this function right after the cosineSimilarity function
 async function findRelevantTextChunks(questionEmbedding, threshold = config.similarityThreshold, topK = config.topKResults) {
-    const db = client.db(config.dbName);
-    const collection = db.collection(config.collectionName);
+  const collection = client.db(config.dbName).collection(config.collectionName);
+  
+  try {
+      // First get more candidates than we need to account for threshold filtering
+      const numCandidates = Math.max(100, topK * 5);  // Dynamic candidate count
+      
+      const pipeline = [
+          {
+              $vectorSearch: {
+                  index: "vector_index",
+                  path: "embedding",
+                  queryVector: questionEmbedding,
+                  numCandidates: numCandidates,
+                  limit: numCandidates  // Get all candidates first
+              }
+          },
+          {
+              $project: {
+                  text_chunk: 1,
+                  similarity: { $meta: "vectorSearchScore" },
+                  embedding: 1  // Keep embedding for optional verification
+              }
+          },
+          {
+              $match: {
+                  similarity: { $gte: threshold }
+              }
+          },
+          {
+              $addFields: {
+                  // Optional: Calculate exact cosine similarity for verification
+                  exactSimilarity: {
+                      $let: {
+                          vars: {
+                              dotProduct: { $reduce: {
+                                  input: { $range: [0, { $size: "$embedding" }] },
+                                  initialValue: 0,
+                                  in: {
+                                      $add: [
+                                          "$$value",
+                                          {
+                                              $multiply: [
+                                                  { $arrayElemAt: ["$embedding", "$$this"] },
+                                                  { $arrayElemAt: [questionEmbedding, "$$this"] }
+                                              ]
+                                          }
+                                      ]
+                                  }
+                              }},
+                              normA: { $sqrt: { $reduce: {
+                                  input: "$embedding",
+                                  initialValue: 0,
+                                  in: { $add: ["$$value", { $pow: ["$$this", 2] }] }
+                              }}},
+                              normB: { $sqrt: { $reduce: {
+                                  input: questionEmbedding,
+                                  initialValue: 0,
+                                  in: { $add: ["$$value", { $pow: ["$$this", 2] }] }
+                              }}}
+                          },
+                          in: {
+                              $divide: [
+                                  "$$dotProduct",
+                                  { $multiply: ["$$normA", "$$normB"] }
+                              ]
+                          }
+                      }
+                  }
+              }
+          },
+          {
+              $sort: { similarity: -1 }  // Sort by similarity score descending
+          },
+          {
+              $limit: topK  // Apply final limit after threshold filtering
+          },
+          {
+              $project: {
+                  text_chunk: 1,
+                  similarity: 1,
+                  // Include exactSimilarity in output if you want to verify
+                  // scoreDiff: { $subtract: ["$exactSimilarity", "$similarity"] }
+              }
+          }
+      ];
 
-    try {
-        const cursor = collection.find();
-        const scoredChunks = [];
-
-        await cursor.forEach(doc => {
-            try {
-                if (!doc.embedding || !Array.isArray(doc.embedding)) {
-                    console.warn("Document missing valid embedding array");
-                    return;
-                }
-
-                const similarity = cosineSimilarity(questionEmbedding, doc.embedding);
-                if (similarity > threshold) {
-                    scoredChunks.push({
-                        text: doc.text_chunk,
-                        similarity: similarity,
-                        chunkId: doc._id
-                    });
-                }
-            } catch (e) {
-                console.error("Error processing document:", e);
-            }
-        });
-
-        // Sort by similarity (descending) and return top K results
-        scoredChunks.sort((a, b) => b.similarity - a.similarity);
-        
-        return scoredChunks.slice(0, topK).map(item => item.text);
-    } catch (error) {
-        console.error("Error in findRelevantTextChunks:", error);
-        throw error;
-    }
+      const results = await collection.aggregate(pipeline).toArray();
+      
+      // Optional: Log if we're getting significantly fewer results than requested
+      if (results.length < topK) {
+          console.warn(`Only found ${results.length} chunks meeting similarity threshold (requested ${topK})`);
+      }
+      
+      return results;
+  } catch (error) {
+      console.error("Vector search error:", error);
+      throw error;
+  }
 }
-
 // Also make sure the askOllama function is properly defined
 async function askOllama(prompt, model = config.ollamaLLMModel) {
     try {
@@ -309,38 +371,44 @@ app.post("/ask", async (req, res) => {
     }
 
     const questionEmbedding = await generateEmbedding(question);
-    const relevantChunks = await findRelevantTextChunks(
+    const searchResults = await findRelevantTextChunks(
       questionEmbedding, 
       config.similarityThreshold, 
       config.topKResults
     );
 
-    if (relevantChunks.length === 0) {
-      return res.status(404).json({ 
-        error: "No relevant information found",
-        suggestion: "Try rephrasing your question or upload more documents"
+    console.log("Search results:", searchResults);
+    
+    // If no results found at all
+    if (searchResults.length === 0) {
+      return res.json({ 
+        answer: "I don't have any information about this.",
+        relevantChunks: 0
+      });
+    }
+
+    // Extract just the text chunks for the context
+    const relevantChunks = searchResults.map(item => item.text_chunk);
+    const averageSimilarity = searchResults.reduce((sum, item) => sum + item.similarity, 0) / searchResults.length;
+    
+    // If the average similarity is too low (even if some chunks were returned)
+    if (averageSimilarity < config.similarityThreshold + 0.1) {
+      return res.json({ 
+        answer: "I don't have have any information about this.",
+        relevantChunks: searchResults.length,
+        averageSimilarity: averageSimilarity
       });
     }
 
     const context = relevantChunks.join("\n\n");
-    const prompt = `
-        Context:
-        ${context}
-
-        Instruction: Provide a detailed, comprehensive answer to the question below. 
-        Include relevant examples from the context when possible. 
-        Break down complex concepts into simpler terms.
-        Aim for 3-5 sentences minimum.
-
-        Question: ${question}
-
-        Answer in paragraph form:`;
+    const prompt = `Based on the following context, answer the question. If you can't answer from the context, say "I don't have information about this."\n\nContext:\n${context}\n\nQuestion: ${question}\n\nAnswer:`;
+    
     const answer = await askOllama(prompt);
 
     res.json({ 
       answer,
-      relevantChunks: relevantChunks.length,
-      contextLength: context.length
+      relevantChunks: searchResults.length,
+      averageSimilarity: averageSimilarity
     });
   } catch (error) {
     console.error("Ask error:", error);

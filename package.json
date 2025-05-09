@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@pinecone-database/pinecone": "^5.1.2",
     "axios": "^1.7.9",
     "chromadb": "^1.10.4",
     "chromadb-default-embed": "^2.13.2",

@@ -5,219 +5,375 @@ const cors = require("cors");
 const fs = require("fs");
 const { MongoClient } = require("mongodb");
 const math = require("mathjs");
+const { split } = require("sentence-splitter");
+const path = require("path");
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3001;
 
+// Enhanced configuration
+const config = {
+  mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017",
+  dbName: "embedding_db",
+  collectionName: "document_embeddings",
+  ollamaEmbeddingModel: "mxbai-embed-large",
+  ollamaLLMModel: "llama3.1",
+  chunkSize: 200,
+  similarityThreshold: 0.4,
+  topKResults: 5,
+  uploadDir: "uploads"
+};
+
+// Middleware setup
 app.use(express.json());
 app.use(cors());
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: "Internal server error" });
+});
 
-let extracted;
-const upload = multer({ dest: "uploads/" });
+// Ensure upload directory exists
+if (!fs.existsSync(config.uploadDir)) {
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+}
 
-// MongoDB connection URI
-const mongoUri = "mongodb://localhost:27017"; // Replace with your MongoDB URI
-const client = new MongoClient(mongoUri);
+const upload = multer({ 
+  dest: config.uploadDir,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 1
+  },
+  fileFilter: (req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() !== '.pdf') {
+      return cb(new Error('Only PDF files are allowed'));
+    }
+    cb(null, true);
+  }
+});
 
-// Connect to MongoDB
+// MongoDB connection with retry logic
+const client = new MongoClient(config.mongoUri, {
+  connectTimeoutMS: 5000,
+  socketTimeoutMS: 30000,
+  serverSelectionTimeoutMS: 5000,
+  maxPoolSize: 50
+});
+
 async function connectToMongo() {
-    try {
-        await client.connect();
-        console.log("Connected to MongoDB");
-    } catch (error) {
-        console.error("Error connecting to MongoDB:", error);
-    }
+  try {
+    await client.connect();
+    console.log("Connected to MongoDB");
+    // Create index for faster similarity searches
+    await client.db(config.dbName)
+      .collection(config.collectionName)
+      .createIndex({ embedding: "2dsphere" });
+  } catch (error) {
+    console.error("Error connecting to MongoDB:", error);
+    // Implement retry logic or exit process in production
+    process.exit(1);
+  }
 }
 
-// Function to insert embeddings and text chunks into MongoDB
-async function storeEmbedding(textChunk, embedding) {
-    const db = client.db("embedding_db");
-    const collection = db.collection("document_embeddings");
+// Enhanced cosine similarity with validation
+function cosineSimilarity(vecA, vecB) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) {
+    throw new Error("Vectors must be of equal length");
+  }
+
+  const dotProduct = math.dot(vecA, vecB);
+  const magnitudeA = math.norm(vecA);
+  const magnitudeB = math.norm(vecB);
+
+  if (magnitudeA === 0 || magnitudeB === 0) {
+    return 0; // Avoid division by zero
+  }
+
+  return dotProduct / (magnitudeA * magnitudeB);
+}
+
+// Improved text chunking with sentence boundaries
+function splitTextIntoChunks(text, maxTokens = config.chunkSize) {
+  try {
+    const sentences = split(text)
+      .filter(e => e.type === "Sentence")
+      .map(s => s.raw.trim())
+      .filter(s => s.length > 0);
+
+    const chunks = [];
+    let currentChunk = "";
+
+    for (const sentence of sentences) {
+      if ((currentChunk.length + sentence.length) > maxTokens && currentChunk.length > 0) {
+        chunks.push(currentChunk);
+        currentChunk = sentence;
+      } else {
+        currentChunk += (currentChunk.length > 0 ? " " : "") + sentence;
+      }
+    }
+
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+    }
+
+    return chunks;
+  } catch (error) {
+    console.error("Error splitting text:", error);
+    // Fallback to simple splitting if sentence parsing fails
+    return text.match(new RegExp(`.{1,${maxTokens}}`, "g")) || [];
+  }
+}
+
+// Enhanced embedding generation with retries
+async function generateEmbedding(text, retries = 3) {
+  if (!text || typeof text !== "string") {
+    throw new Error("Invalid text input");
+  }
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch("http://localhost:11434/api/embeddings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: config.ollamaEmbeddingModel,
+          prompt: text
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.embedding || !Array.isArray(data.embedding)) {
+        throw new Error("Invalid embedding received");
+      }
+
+      return data.embedding;
+    } catch (error) {
+      if (attempt === retries) {
+        console.error(`Embedding generation failed after ${retries} attempts:`, error);
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+}
+
+// Improved document processing with cleanup
+async function processDocument(filePath) {
+  try {
+    const fileBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdfParse(fileBuffer);
+    return pdfData.text;
+  } finally {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (cleanupError) {
+      console.error("Error cleaning up file:", cleanupError);
+    }
+  }
+}
+
+// Enhanced storage with bulk operations
+async function storeEmbeddings(chunks, embeddings) {
+  if (chunks.length !== embeddings.length) {
+    throw new Error("Chunks and embeddings must be of equal length");
+  }
+
+  const db = client.db(config.dbName);
+  const collection = db.collection(config.collectionName);
+
+  const operations = chunks.map((chunk, index) => ({
+    text_chunk: chunk,
+    embedding: embeddings[index],
+    timestamp: new Date()
+  }));
+
+  try {
+    const result = await collection.insertMany(operations);
+    console.log(`Stored ${result.insertedCount} embeddings`);
+    return result;
+  } catch (error) {
+    console.error("Error storing embeddings:", error);
+    throw error;
+  }
+}
+
+// Route handlers with better validation and error handling
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const text = await processDocument(req.file.path);
+    const chunks = splitTextIntoChunks(text);
+    
+    // Generate embeddings in parallel with rate limiting
+    const embeddingPromises = chunks.map(chunk => generateEmbedding(chunk));
+    const embeddings = await Promise.all(embeddingPromises);
+
+    await storeEmbeddings(chunks, embeddings.filter(e => e !== null));
+
+    res.json({ 
+      message: "File processed successfully",
+      chunksProcessed: chunks.length,
+      embeddingsStored: embeddings.filter(e => e !== null).length
+    });
+  } catch (error) {
+    console.error("Upload error:", error);
+    res.status(500).json({ 
+      error: "Error processing file",
+      details: error.message 
+    });
+  }
+});
+
+// Add this function right after the cosineSimilarity function
+async function findRelevantTextChunks(questionEmbedding, threshold = config.similarityThreshold, topK = config.topKResults) {
+    const db = client.db(config.dbName);
+    const collection = db.collection(config.collectionName);
 
     try {
-        const result = await collection.insertOne({
-            text_chunk: textChunk,
-            embedding: embedding,
-            timestamp: new Date()
+        const cursor = collection.find();
+        const scoredChunks = [];
+
+        await cursor.forEach(doc => {
+            try {
+                if (!doc.embedding || !Array.isArray(doc.embedding)) {
+                    console.warn("Document missing valid embedding array");
+                    return;
+                }
+
+                const similarity = cosineSimilarity(questionEmbedding, doc.embedding);
+                if (similarity > threshold) {
+                    scoredChunks.push({
+                        text: doc.text_chunk,
+                        similarity: similarity,
+                        chunkId: doc._id
+                    });
+                }
+            } catch (e) {
+                console.error("Error processing document:", e);
+            }
         });
-        console.log("Embedding stored in MongoDB with ID:", result.insertedId);
+
+        // Sort by similarity (descending) and return top K results
+        scoredChunks.sort((a, b) => b.similarity - a.similarity);
+        
+        return scoredChunks.slice(0, topK).map(item => item.text);
     } catch (error) {
-        console.error("Error storing embedding in MongoDB:", error);
+        console.error("Error in findRelevantTextChunks:", error);
+        throw error;
     }
 }
 
-// Function to generate embeddings
-async function generateEmbedding(text) {
-    try {
-        const response = await fetch("http://localhost:11434/api/embeddings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: "mxbai-embed-large",
-                prompt: text
-            })
-        });
-
-        const data = await response.json();
-        return data.embedding;
-    } catch (error) {
-        console.error("Error generating embedding:", error.message);
-        return null;
-    }
-}
-
-// Function to ask Ollama a question
-async function askOllama(prompt) {
+// Also make sure the askOllama function is properly defined
+async function askOllama(prompt, model = config.ollamaLLMModel) {
     try {
         const response = await fetch("http://localhost:11434/api/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                model: "tinyllama",
+                model: model,
                 prompt: prompt,
-                stream: false
+                stream: false,
+                options: {
+                    temperature: 0.7,
+                    top_p: 0.9
+                }
             })
         });
+
+        if (!response.ok) {
+            throw new Error(`Ollama API error: ${response.statusText}`);
+        }
 
         const data = await response.json();
         return data.response;
     } catch (error) {
-        console.error("Error communicating with Ollama:", error.message);
-        return "Failed to get response from Ollama.";
+        console.error("Error asking Ollama:", error);
+        throw error;
     }
 }
 
-// Function to split text into chunks
-const chunkSize = 200; // Number of characters per chunk
-function splitTextIntoChunks(text, chunkSize) {
-    const chunks = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-        chunks.push(text.slice(i, i + chunkSize));
-    }
-    return chunks;
-}
 
-// Route to upload a PDF and extract text
-app.post("/upload", upload.single("file"), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: "No file uploaded" });
-        }
-
-        const fileBuffer = fs.readFileSync(req.file.path);
-        const pdfData = await pdfParse(fileBuffer);
-        const extractedText = pdfData.text;
-
-        // Split text into chunks
-        const textChunks = splitTextIntoChunks(extractedText, chunkSize);
-
-        // Generate embeddings for each chunk
-        for (const chunk of textChunks) {
-            const embedding = await generateEmbedding(chunk);
-            if (embedding) {
-                await storeEmbedding(chunk, embedding);
-            }
-        }
-
-        res.json({ message: "File processed successfully" });
-        fs.unlinkSync(req.file.path);
-    } catch (error) {
-        res.status(500).json({ error: "Error processing file" });
-    }
-});
-
-// Function to generate embedding for the question
-async function generateQuestionEmbedding(question) {
-    try {
-        const response = await fetch("http://localhost:11434/api/embeddings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: "mxbai-embed-large",
-                prompt: question
-            })
-        });
-
-        const data = await response.json();
-        return data.embedding;
-    } catch (error) {
-        console.error("Error generating question embedding:", error.message);
-        return null;
-    }
-}
-
-// Function to calculate cosine similarity
-function cosineSimilarity(vecA, vecB) {
-    const dotProduct = math.dot(vecA, vecB);
-    const magnitudeA = math.norm(vecA);
-    const magnitudeB = math.norm(vecB);
-    return dotProduct / (magnitudeA * magnitudeB);
-}
-
-// Function to find the most relevant text chunks
-async function findRelevantTextChunks(questionEmbedding, threshold = 0.5) {
-    const db = client.db("embedding_db");
-    const collection = db.collection("document_embeddings");
-
-    try {
-        const cursor = collection.find();
-        const relevantChunks = [];
-
-        await cursor.forEach(doc => {
-            const similarity = cosineSimilarity(questionEmbedding, doc.embedding);
-            if (similarity > threshold) {
-                relevantChunks.push(doc.text_chunk);
-            }
-        });
-
-        return relevantChunks;
-    } catch (error) {
-        console.error("Error finding relevant text chunks:", error);
-        return [];
-    }
-}
-
-// Route to ask questions using stored embeddings
 app.post("/ask", async (req, res) => {
+  try {
     const { question } = req.body;
-
-    if (!question) {
-        return res.status(400).json({ error: "Missing question" });
+    
+    if (!question || typeof question !== "string" || question.trim().length === 0) {
+      return res.status(400).json({ error: "Invalid question" });
     }
 
-    try {
-        // Generate embedding for the question
-        const questionEmbedding = await generateQuestionEmbedding(question);
-        console.log("Question embedding:", questionEmbedding);
+    const questionEmbedding = await generateEmbedding(question);
+    const relevantChunks = await findRelevantTextChunks(
+      questionEmbedding, 
+      config.similarityThreshold, 
+      config.topKResults
+    );
 
-        if (!questionEmbedding) {
-            return res.status(500).json({ error: "Failed to generate question embedding" });
-        }
-
-        // Find relevant text chunks from MongoDB
-        const relevantChunks = await findRelevantTextChunks(questionEmbedding);
-        console.log("Relevant chunks:", relevantChunks);
-
-        if (relevantChunks.length === 0) {
-            return res.status(404).json({ error: "No relevant information found" });
-        }
-
-        // Combine relevant chunks into a single context
-        const context = relevantChunks.join("\n\n");
-        console.log("Context:", context);
-
-        // Ask Ollama the question with the context
-        const prompt = `Based on the following context, answer the question: \n\n Context: ${context} \n\n Question: ${question}`;
-        const answer = await askOllama(prompt);
-
-        res.json({ answer });
-    } catch (error) {
-        res.status(500).json({ error: "Error processing question" });
+    if (relevantChunks.length === 0) {
+      return res.status(404).json({ 
+        error: "No relevant information found",
+        suggestion: "Try rephrasing your question or upload more documents"
+      });
     }
+
+    const context = relevantChunks.join("\n\n");
+    const prompt = `
+        Context:
+        ${context}
+
+        Instruction: Provide a detailed, comprehensive answer to the question below. 
+        Include relevant examples from the context when possible. 
+        Break down complex concepts into simpler terms.
+        Aim for 3-5 sentences minimum.
+
+        Question: ${question}
+
+        Answer in paragraph form:`;
+    const answer = await askOllama(prompt);
+
+    res.json({ 
+      answer,
+      relevantChunks: relevantChunks.length,
+      contextLength: context.length
+    });
+  } catch (error) {
+    console.error("Ask error:", error);
+    res.status(500).json({ 
+      error: "Error processing question",
+      details: error.message 
+    });
+  }
 });
 
-// Start the server and connect to MongoDB
-app.listen(port, async () => {
-    await connectToMongo();
-    console.log(`Server running at http://localhost:${port}`);
+// Start the server with proper shutdown handling
+const server = app.listen(port, async () => {
+  await connectToMongo();
+  console.log(`Server running at http://localhost:${port}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received. Shutting down gracefully...");
+  server.close(() => {
+    client.close().then(() => {
+      console.log("Server and MongoDB connection closed");
+      process.exit(0);
+    });
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received. Shutting down gracefully...");
+  server.close(() => {
+    client.close().then(() => {
+      console.log("Server and MongoDB connection closed");
+      process.exit(0);
+    });
+  });
 });
