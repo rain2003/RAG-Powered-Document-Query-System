@@ -52,23 +52,21 @@ function App() {
     const activeChat = chats.find(chat => chat.isActive);
     if (!activeChat) return;
 
-    const newUserMessage = { 
-      id: Date.now(), 
-      content: inputValue, 
-      isUser: true 
+    const newUserMessage = {
+      id: Date.now(),
+      content: inputValue,
+      isUser: true
     };
 
-    // Update messages for current chat
     setChatHistories(prev => ({
       ...prev,
       [activeChat.id]: [...(prev[activeChat.id] || []), newUserMessage]
     }));
-    
+
     setInputValue('');
     setIsLoading(true);
 
     try {
-      // Call your /ask API endpoint
       const response = await fetch('http://localhost:3001/ask', {
         method: 'POST',
         headers: {
@@ -78,28 +76,43 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to get answer');
-      }
+        const errorData = await response.json();
+        let errorMessageContent = "Sorry, there was an error processing your question.";
+        if (response.status === 404 && errorData.error === "No relevant information found") {
+          errorMessageContent = `No relevant information found. Try rephrasing your question or upload more documents.`;
+        }
 
-      const data = await response.json();
-      
-      const botMessage = { 
-        id: Date.now() + 1, 
-        content: data.answer || "I couldn't find an answer to that question.", 
-        isUser: false 
-      };
-      
-      setChatHistories(prev => ({
-        ...prev,
-        [activeChat.id]: [...(prev[activeChat.id] || []), botMessage]
-      }));
+        const errorMessage = {
+          id: Date.now() + 1,
+          content: errorMessageContent,
+          isUser: false
+        };
+
+        setChatHistories(prev => ({
+          ...prev,
+          [activeChat.id]: [...(prev[activeChat.id] || []), errorMessage]
+        }));
+      } else {
+        const data = await response.json();
+        const botMessage = {
+          id: Date.now() + 1,
+          content: data.answer || "I couldn't find an answer to that question.",
+          isUser: false
+        };
+
+        setChatHistories(prev => ({
+          ...prev,
+          [activeChat.id]: [...(prev[activeChat.id] || []), botMessage]
+        }));
+      }
     } catch (error) {
-      const errorMessage = { 
-        id: Date.now() + 1, 
-        content: "Sorry, there was an error processing your question.", 
-        isUser: false 
+      console.error("Error fetching answer:", error);
+      const errorMessage = {
+        id: Date.now() + 1,
+        content: "Sorry, there was an error processing your question.",
+        isUser: false
       };
-      
+
       setChatHistories(prev => ({
         ...prev,
         [activeChat.id]: [...(prev[activeChat.id] || []), errorMessage]
@@ -169,13 +182,15 @@ function App() {
     setCurrentFile(file);
     
     const activeChat = chats.find(chat => chat.isActive);
-    if (!activeChat) return;
+    if (!activeChat) {
+      setIsProcessingFile(false);
+      return;
+    }
 
     try {
       const formData = new FormData();
       formData.append('file', file);
 
-      // Call your /upload API endpoint
       const response = await fetch('http://localhost:3001/upload', {
         method: 'POST',
         body: formData
@@ -187,34 +202,51 @@ function App() {
 
       const data = await response.json();
       
-      // Update chat title and state
       setChats(chats.map(chat => 
         chat.id === activeChat.id 
           ? { ...chat, title: `Document: ${file.name}`, hasFile: true } 
           : chat
       ));
+
+      const summaryResponse = await fetch('http://localhost:3001/ask', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          question: `Please provide a detailed summary of the document `
+        })
+      });
+
+      if (!summaryResponse.ok) {
+        throw new Error('Failed to generate summary');
+      }
+
+      const summaryData = await summaryResponse.json();
       
-      // Add success message
+      const summaryMessage = { 
+        id: Date.now(), 
+        content: `Document Summary:\n\n${summaryData.answer || "No summary could be generated."}`, 
+        isUser: false 
+      };
       setChatHistories(prev => ({
         ...prev,
-        [activeChat.id]: [
-          { 
-            id: Date.now(), 
-            content: `Document "${file.name}" has been successfully processed. You can now ask questions about it.`, 
-            isUser: false 
-          }
-        ]
+        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg => 
+          !msg.content.includes('Upload a document to begin chatting')
+        ), summaryMessage]
       }));
+
     } catch (error) {
+      const errorMessage = { 
+        id: Date.now(), 
+        content: `Error: ${error.message}`, 
+        isUser: false 
+      };
       setChatHistories(prev => ({
         ...prev,
-        [activeChat.id]: [
-          { 
-            id: Date.now(), 
-            content: `Error processing document: ${error.message}`, 
-            isUser: false 
-          }
-        ]
+        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg => 
+          !msg.content.includes('Upload a document to begin chatting')
+        ), errorMessage]
       }));
       setCurrentFile(null);
     } finally {
@@ -264,7 +296,6 @@ function App() {
                       <span></span>
                     </div>
                     <h3>Processing Document...</h3>
-                    <p>Please wait while we analyze your file</p>
                   </>
                 ) : (
                   <>
@@ -297,7 +328,7 @@ function App() {
                     </div>
                   </div>
                 ))}
-                {isLoading && (
+                {(isLoading || isProcessingFile) && (
                   <div className="message bot-message">
                     <div className="message-content typing-indicator">
                       <span></span>
@@ -352,4 +383,4 @@ function App() {
   );
 }
 
-export default App;
+export default App; 

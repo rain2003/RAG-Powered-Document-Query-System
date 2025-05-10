@@ -392,3 +392,69 @@
 .input-container input:disabled {
   background-color: #f5f5f5;
 }
+
+/* Loading Animations */
+.processing-indicator,
+.typing-indicator {
+  display: inline-flex;
+  padding: 10px;
+}
+
+.processing-indicator span,
+.typing-indicator span {
+  height: 8px;
+  width: 8px;
+  background: #4a6fa5;
+  border-radius: 50%;
+  display: inline-block;
+  margin: 0 2px;
+  animation: bounce 1s infinite ease-in-out;
+}
+
+.processing-indicator span:nth-child(2),
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.processing-indicator span:nth-child(3),
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+/* Upload Box Styling */
+.upload-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+}
+
+.upload-box {
+  border: 2px dashed #4a6fa5;
+  border-radius: 10px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  max-width: 400px;
+  width: 100%;
+}
+
+.upload-box:hover {
+  background-color: #f5f8ff;
+}
+
+.upload-box h3 {
+  margin-top: 1rem;
+  color: #4a6fa5;
+}
+
+.upload-box p {
+  color: #666;
+  margin-top: 0.5rem;
+}
