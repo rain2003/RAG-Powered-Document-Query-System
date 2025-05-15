@@ -458,3 +458,118 @@
   color: #666;
   margin-top: 0.5rem;
 }
+
+/* Filter Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal {
+  background-color: white;
+  padding: 2rem;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.modal h3 {
+  margin-top: 0;
+  color: #4a6fa5;
+}
+
+.filter-input {
+  margin-bottom: 1rem;
+}
+
+.filter-input textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.modal-actions button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.modal-actions button:last-child {
+  background-color: #4a6fa5;
+  color: white;
+}
+
+/* Sidebar Filter Section */
+.filter-chat-item {
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+}
+
+.filter-chat-item.active {
+  background-color: #f0f4ff;
+}
+
+.filter-chat-upload {
+  display: none;
+}
+
+.filter-chat-item:hover .filter-chat-upload {
+  display: block;
+}
+
+.sidebar-divider {
+  border-top: 2px solid #4a6fa5;
+  margin: 1rem 0;
+  opacity: 0.5;
+}
+
+/* Filter Controls */
+.filter-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+
+.apply-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #f0f4ff;
+  border: 1px solid #4a6fa5;
+  color: #4a6fa5;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+}
+
+.apply-filter-btn:hover {
+  background-color: #e1e8ff;
+}
+
+.apply-filter-btn svg {
+  margin-right: 0.25rem;
+}

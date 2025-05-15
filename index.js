@@ -17,7 +17,7 @@ const config = {
     dbName: "embedding_db",
     collectionName: "document_embeddings",
     ollamaEmbeddingModel: "mxbai-embed-large",
-    geminiModel: "gemini-1.5-flash", // or "gemini-2.0-flash" when available
+    geminiModel: "gemini-2.0-flash", // or "gemini-2.0-flash" when available
     chunkSize: 200,
     similarityThreshold: 0.4,
     topKResults: 5,
@@ -342,7 +342,7 @@ app.post("/ask", async (req, res) => {
                 suggestion: "Try rephrasing your question or upload more documents"
             });
         }
-
+        console.log(relevantChunks);
         const context = relevantChunks.join("\n\n");
         const prompt = `
             Context:
@@ -354,6 +354,9 @@ app.post("/ask", async (req, res) => {
             Aim for 7-8 sentences minimum.
 
             Question: ${question}
+
+            If the question is not clearly related to the context or cannot be answered using the given information, 
+            respond with: "The question appears to be irrelevant or unrelated to the provided context."
 
             Answer in paragraph form:`;
         
@@ -372,6 +375,63 @@ app.post("/ask", async (req, res) => {
         });
     }
 });
+
+app.post("/ask-filter", async (req, res) => {
+    try {
+        const { question, filterQuestion } = req.body;
+        
+        if (!question || typeof question !== "string" || question.trim().length === 0) {
+            return res.status(400).json({ error: "Invalid question" });
+        }
+
+        const questionEmbedding = await generateEmbedding(question);
+        const relevantChunks = await findRelevantTextChunks(
+            questionEmbedding, 
+            config.similarityThreshold, 
+            config.topKResults
+        );
+
+        if (relevantChunks.length === 0) {
+            return res.status(404).json({ 
+                error: "No relevant information found",
+                suggestion: "Try rephrasing your question or upload more documents"
+            });
+        }
+
+        const context = relevantChunks.join("\n\n");
+        const prompt = `
+            Specialization Filters:
+            ${filterQuestion}
+
+            Context:
+            ${context}
+
+            Instruction: 
+            You are operating under specific specialization filters. 
+            Provide a detailed analysis that strictly adheres to these filters.
+            Use domain-specific terminology and examples where appropriate.
+            If the question cannot be answered within these filters, explain why.
+
+            Question: ${question}
+
+            Filtered Analysis:`;
+        
+        const answer = await askGemini(prompt);
+
+        res.json({ 
+            answer,
+            relevantChunks: relevantChunks.length,
+            contextLength: context.length
+        });
+    } catch (error) {
+        console.error("Ask-filter error:", error);
+        res.status(500).json({ 
+            error: "Error processing filtered question",
+            details: error.message 
+        });
+    }
+});
+
 
 app.post("/api/chats", async (req, res) => {
   try {

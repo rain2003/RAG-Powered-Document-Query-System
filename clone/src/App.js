@@ -9,13 +9,19 @@ function App() {
   });
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isProcessingFile, setIsProcessingFile] = useState(false);
   const [chats, setChats] = useState([
-    { id: Object.keys(chatHistories)[0], title: 'New Document Chat', isActive: true, hasFile: false }
+    {
+      id: Object.keys(chatHistories)[0],
+      title: 'New Document Chat',
+      isActive: true,
+      file: null,
+      isProcessingFile: false,
+      isFiltered: false,
+      filters: []
+    }
   ]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isMobileView, setIsMobileView] = useState(false);
-  const [currentFile, setCurrentFile] = useState(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
 
@@ -47,10 +53,8 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!inputValue.trim() || !currentFile) return;
-
     const activeChat = chats.find(chat => chat.isActive);
-    if (!activeChat) return;
+    if (!inputValue.trim() || !activeChat?.file || activeChat?.isFiltered) return;
 
     const newUserMessage = {
       id: Date.now(),
@@ -122,21 +126,34 @@ function App() {
     }
   };
 
-  const createNewChat = () => {
+  const createNewChat = (filteredChat = null) => {
     const newChatId = Date.now();
-    const newChat = {
+    const newChat = filteredChat || {
       id: newChatId,
       title: `Document Chat ${chats.length + 1}`,
       isActive: true,
-      hasFile: false
+      file: null,
+      isFiltered: false,
+      filters: []
     };
     
-    setChats(chats.map(chat => ({ ...chat, isActive: false })).concat(newChat));
+    if (filteredChat) {
+      setChats([newChat, ...chats.map(chat => ({ ...chat, isActive: false }))]);
+    } else {
+      setChats([...chats.map(chat => ({ ...chat, isActive: false })), newChat]);
+    }
+    
     setChatHistories(prev => ({
       ...prev,
-      [newChatId]: [{ id: 1, content: 'Upload a document to begin chatting', isUser: false }]
+      [newChat.id]: [{ 
+        id: 1, 
+        content: filteredChat ? 
+          `This is a filtered chat. Upload a document to analyze with these specific filters:\n\n${filteredChat.filters.join('\n')}\n\nOnly document uploads are allowed in this chat.` : 
+          'Upload a document to begin chatting', 
+        isUser: false 
+      }]
     }));
-    setCurrentFile(null);
+    
     if (isMobileView) setIsSidebarOpen(false);
   };
 
@@ -145,76 +162,114 @@ function App() {
       ...chat,
       isActive: chat.id === chatId
     })));
-    
-    const newActiveChat = chats.find(chat => chat.id === chatId);
-    setCurrentFile(newActiveChat?.hasFile ? currentFile : null);
-    
     if (isMobileView) setIsSidebarOpen(false);
   };
 
   const deleteChat = (chatId) => {
     if (chats.length <= 1) return;
-    
+
     const newChats = chats.filter(chat => chat.id !== chatId);
     const wasActive = chats.find(chat => chat.id === chatId)?.isActive;
-    
+
     setChats(newChats.map((chat, index) => ({
       ...chat,
       isActive: wasActive ? (index === 0 ? true : false) : chat.isActive
     })));
-    
+
     setChatHistories(prev => {
-      const newHistories = {...prev};
+      const newHistories = { ...prev };
       delete newHistories[chatId];
       return newHistories;
     });
-    
-    if (wasActive) {
-      setCurrentFile(null);
-    }
   };
 
   const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const file = e.target.files[0];
+  if (!file) return;
 
-    setIsProcessingFile(true);
-    setCurrentFile(file);
-    
-    const activeChat = chats.find(chat => chat.isActive);
-    if (!activeChat) {
-      setIsProcessingFile(false);
-      return;
+  const activeChat = chats.find(chat => chat.isActive);
+  if (!activeChat) {
+    return;
+  }
+
+  // Set isProcessingFile true for the current active chat
+  setChats(prevChats =>
+    prevChats.map(chat =>
+      chat.id === activeChat.id ? { ...chat, isProcessingFile: true } : chat
+    )
+  );
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('http://localhost:3001/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      throw new Error('File processing failed');
     }
 
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
+    const data = await response.json();
 
-      const response = await fetch('http://localhost:3001/upload', {
+    // Update the chat with the file information
+    setChats(prevChats =>
+      prevChats.map(chat =>
+        chat.id === activeChat.id
+          ? { ...chat, title: `Document: ${file.name}`, file: file, isProcessingFile: true }
+          : chat
+      )
+    );
+
+    let prompt;
+    if (activeChat.isFiltered && activeChat.filters?.length > 0) {
+      // Use the filters as the prompt for filtered chats
+      prompt = `Please process this document with the following filters:\n${activeChat.filters.join('\n')}\n\nProvide a detailed analysis.`;
+      
+      // Call the ask-filter endpoint for filtered chats
+      const summaryResponse = await fetch('http://localhost:3001/ask-filter', {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: prompt,
+          filterQuestion: activeChat.filters.join('\n') // Pass filters separately
+        })
       });
 
-      if (!response.ok) {
-        throw new Error('File processing failed');
+      if (!summaryResponse.ok) {
+        throw new Error('Failed to generate filtered analysis');
       }
 
-      const data = await response.json();
-      
-      setChats(chats.map(chat => 
-        chat.id === activeChat.id 
-          ? { ...chat, title: `Document: ${file.name}`, hasFile: true } 
-          : chat
-      ));
+      const summaryData = await summaryResponse.json();
 
+      const summaryMessage = {
+        id: Date.now(),
+        content: `Filtered Document Analysis:\n\n${summaryData.answer || "No analysis could be generated."}`,
+        isUser: false
+      };
+      setChatHistories(prev => ({
+        ...prev,
+        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg =>
+          !msg.content.includes('Upload a document to')
+        ), summaryMessage]
+      }));
+
+    } else {
+      // Default prompt for regular chats
+      prompt = `Please provide a detailed summary of the document`;
+      
+      // Call the regular ask endpoint for non-filtered chats
       const summaryResponse = await fetch('http://localhost:3001/ask', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ 
-          question: `Please provide a detailed summary of the document `
+        body: JSON.stringify({
+          question: prompt
         })
       });
 
@@ -223,40 +278,50 @@ function App() {
       }
 
       const summaryData = await summaryResponse.json();
-      
-      const summaryMessage = { 
-        id: Date.now(), 
-        content: `Document Summary:\n\n${summaryData.answer || "No summary could be generated."}`, 
-        isUser: false 
+
+      const summaryMessage = {
+        id: Date.now(),
+        content: `Document Summary:\n\n${summaryData.answer || "No summary could be generated."}`,
+        isUser: false
       };
       setChatHistories(prev => ({
         ...prev,
-        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg => 
-          !msg.content.includes('Upload a document to begin chatting')
+        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg =>
+          !msg.content.includes('Upload a document to')
         ), summaryMessage]
       }));
-
-    } catch (error) {
-      const errorMessage = { 
-        id: Date.now(), 
-        content: `Error: ${error.message}`, 
-        isUser: false 
-      };
-      setChatHistories(prev => ({
-        ...prev,
-        [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg => 
-          !msg.content.includes('Upload a document to begin chatting')
-        ), errorMessage]
-      }));
-      setCurrentFile(null);
-    } finally {
-      setIsProcessingFile(false);
     }
-  };
+
+  } catch (error) {
+    const errorMessage = {
+      id: Date.now(),
+      content: `Error: ${error.message}`,
+      isUser: false
+    };
+    setChatHistories(prev => ({
+      ...prev,
+      [activeChat.id]: [...(prev[activeChat.id] || []).filter(msg =>
+        !msg.content.includes('Upload a document to')
+      ), errorMessage]
+    }));
+  } finally {
+    // Set isProcessingFile false for the current active chat
+    setChats(prevChats =>
+      prevChats.map(chat =>
+        chat.id === activeChat.id ? { ...chat, isProcessingFile: false } : chat
+      )
+    );
+    // Reset file input to allow re-uploading the same file
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }
+};
 
   const activeChat = chats.find(chat => chat.isActive);
-  const activeChatHasFile = activeChat?.hasFile || currentFile;
+  const activeChatHasFile = activeChat?.file !== null;
   const currentMessages = getCurrentMessages();
+  const isCurrentChatProcessingFile = activeChat?.isProcessingFile || false;
 
   return (
     <div className="app">
@@ -287,8 +352,8 @@ function App() {
         <div className="chat-container">
           {!activeChatHasFile ? (
             <div className="upload-container">
-              <div className="upload-box" onClick={() => !isProcessingFile && fileInputRef.current.click()}>
-                {isProcessingFile ? (
+              <div className="upload-box" onClick={() => !isCurrentChatProcessingFile && fileInputRef.current.click()}>
+                {isCurrentChatProcessingFile ? (
                   <>
                     <div className="processing-indicator">
                       <span></span>
@@ -306,12 +371,12 @@ function App() {
                     <p>Drag & drop a file here, or click to browse</p>
                   </>
                 )}
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
+                <input
+                  type="file"
+                  ref={fileInputRef}
                   onChange={handleFileUpload}
-                  style={{ display: 'none' }} 
-                  disabled={isProcessingFile}
+                  style={{ display: 'none' }}
+                  disabled={isCurrentChatProcessingFile}
                 />
               </div>
             </div>
@@ -319,16 +384,21 @@ function App() {
             <>
               <div className="messages">
                 {currentMessages.map((message) => (
-                  <div 
-                    key={message.id} 
+                  <div
+                    key={message.id}
                     className={`message ${message.isUser ? 'user-message' : 'bot-message'}`}
                   >
                     <div className="message-content">
-                      {message.content}
+                      {message.content.split('\n').map((line, index) => (
+                        <React.Fragment key={index}>
+                          {line}
+                          <br />
+                        </React.Fragment>
+                      ))}
                     </div>
                   </div>
                 ))}
-                {(isLoading || isProcessingFile) && (
+                {(isLoading || isCurrentChatProcessingFile) && (
                   <div className="message bot-message">
                     <div className="message-content typing-indicator">
                       <span></span>
@@ -340,41 +410,66 @@ function App() {
                 <div ref={messagesEndRef} />
               </div>
 
-              <form className="input-area" onSubmit={handleSubmit}>
-                <div className="input-container">
-                  <button 
-                    type="button" 
-                    className="file-upload-btn"
-                    onClick={() => fileInputRef.current.click()}
-                  >
-                    <svg viewBox="0 0 24 24" width="24" height="24">
-                      <path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"></path>
-                    </svg>
-                  </button>
-                  <input
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    placeholder="Ask about your document..."
-                    disabled={isLoading || isProcessingFile}
-                  />
-                  <button type="submit" disabled={isLoading || !inputValue.trim() || isProcessingFile}>
-                    <svg viewBox="0 0 24 24" width="24" height="24">
-                      <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
-                    </svg>
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileUpload}
-                    style={{ display: 'none' }} 
-                    disabled={isProcessingFile}
-                  />
+              {activeChat?.isFiltered ? (
+                <div className="input-area">
+                  <div className="input-container filtered">
+                    <button
+                      type="button"
+                      className="file-upload-btn"
+                      onClick={() => fileInputRef.current.click()}
+                      disabled={isCurrentChatProcessingFile}
+                    >
+                      <svg viewBox="0 0 24 24" width="24" height="24">
+                        <path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"></path>
+                      </svg>
+                    </button>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      style={{ display: 'none' }}
+                      disabled={isCurrentChatProcessingFile}
+                    />
+                  </div>
                 </div>
-                <div className="disclaimer">
-                  Document analysis may contain errors. Verify important information.
-                </div>
-              </form>
+              ) : (
+                <form className="input-area" onSubmit={handleSubmit}>
+                  <div className="input-container">
+                    <button
+                      type="button"
+                      className="file-upload-btn"
+                      onClick={() => fileInputRef.current.click()}
+                      disabled={isCurrentChatProcessingFile || isLoading}
+                    >
+                      <svg viewBox="0 0 24 24" width="24" height="24">
+                        <path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"></path>
+                      </svg>
+                    </button>
+                    <input
+                      type="text"
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      placeholder="Ask about your document..."
+                      disabled={isLoading || isCurrentChatProcessingFile}
+                    />
+                    <button type="submit" disabled={isLoading || !inputValue.trim() || isCurrentChatProcessingFile}>
+                      <svg viewBox="0 0 24 24" width="24" height="24">
+                        <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                      </svg>
+                    </button>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      style={{ display: 'none' }}
+                      disabled={isCurrentChatProcessingFile}
+                    />
+                  </div>
+                  <div className="disclaimer">
+                    Document analysis may contain errors. Verify important information.
+                  </div>
+                </form>
+              )}
             </>
           )}
         </div>
@@ -383,4 +478,4 @@ function App() {
   );
 }
 
-export default App; 
+export default App;
